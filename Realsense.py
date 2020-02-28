@@ -51,6 +51,7 @@ def processDepthImage(np_image, depth_scale, lut):
     np_image = np_image.astype(np.uint8)
     #print(np.amin(np_image), np.amax(np_image))
     imgRGB = cv2.applyColorMap(np_image, lut)
+    imgRGB = np.rot90(imgRGB, k=3)
     return imgRGB
 
 class Pipeline:
