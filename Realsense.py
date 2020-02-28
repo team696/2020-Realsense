@@ -8,6 +8,11 @@ import numpy as np
 from PIL import Image
 
 pipeline = None
+depth_scale = None
+
+MIN_DISTANCE = 24
+MAX_DISTANCE = 36
+
 
 class CamHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -24,11 +29,22 @@ class CamHandler(BaseHTTPRequestHandler):
                     frames = pipeline.wait_for_frames()
                     depth = frames.get_depth_frame().as_frame().get_data()
                     np_image = np.asanyarray(depth)
-                    imgRGB=cv2.cvtColor(np_image,cv2.COLOR_GRAY2RGB)
-                    print(type(imgRGB))
+                    #print(np_image.shape, np_image.dtype)
+                    np_image = np_image.astype(np.float)
+                    np_image *= depth_scale
+                    np_image = cv2.convertScaleAbs(np_image)
+                    print(np.amin(np_image), np.amax(np_image))
+                    #np_image *= depth_scale
+                    #imgRGB=cv2.cvtColor(np_image,cv2.COLOR_GRAY2RGB)
+                    imgRGB = cv2.applyColorMap(np_image, cv2.COLORMAP_JET)
+                    #print(imgRGB.shape, imgRGB.dtype)
+                    #imgRGB = (imgRGB / 257).astype(np.uint8)
+                    #print(imgRGB.shape, imgRGB.dtype)
+                    #print(np.amin(imgRGB), np.amax(imgRGB))
+                    #jpg = Image.fromarray(imgRGB, 'RGB')
                     jpg = Image.fromarray(np_image)
                     tmpFile = BytesIO()
-                    jpg = jpg.point(lambda i:i*(1./256)).convert('L')
+                    #jpg = jpg.point(lambda i:i*(1./256)).convert('L')
                     jpg.save(tmpFile,'JPEG')
                     self.wfile.write("--jpgboundary".encode('utf-8'))
                     self.send_header('Content-type','image/jpeg')
@@ -54,6 +70,7 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
 def main():
     global pipeline
+    global depth_scale
     pipeline = rs.pipeline()
     prof = pipeline.start()
     dev = prof.get_device()
@@ -62,7 +79,7 @@ def main():
 
     ds = rs.depth_sensor(dev.query_sensors()[0])
     depth_scale = ds.get_depth_scale() #metrics per 1 LSB
-    depth_scale *= 39.3701 #Convert to inches
+    depth_scale *= 39.3701 #Convert to inches 
 
     try:
         server = ThreadedHTTPServer(('0.0.0.0', 8080), CamHandler)
