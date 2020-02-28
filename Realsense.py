@@ -87,12 +87,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                     jpg = Image.fromarray(depthImg.get_img("Consumer"))
                     tmpFile = BytesIO()
                     #jpg = jpg.point(lambda i:i*(1./256)).convert('L')
-                    jpg.save(tmpFile,'JPEG')
+                    jpg.save(tmpFile,'JPEG', quality=40)
                     self.wfile.write("--jpgboundary".encode('utf-8'))
                     self.send_header('Content-type','image/jpeg')
                     self.send_header('Content-length',str(len(tmpFile.getvalue())))
                     self.end_headers()
-                    jpg.save(self.wfile,'JPEG')
+                    jpg.save(self.wfile,'JPEG', quality=40)
                     time.sleep(0.02)
                 except KeyboardInterrupt:
                     break
@@ -121,9 +121,11 @@ def camera_handler(depth_pipe):
             prof = pipeline.start()
             dev = prof.get_device()
             dev.hardware_reset()
-            time.sleep(2.)
+            time.sleep(2)
+            cfg = rs.config()
+            cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
             pipeline = rs.pipeline()
-            prof = pipeline.start()
+            prof = pipeline.start(cfg)
             dev = prof.get_device()
             print(dev)
             print([str(x) for x in dev.query_sensors()])
@@ -149,14 +151,16 @@ def camera_handler(depth_pipe):
                 raise
         except KeyboardInterrupt:
             break
-        except:
+        except Exception as e:
+            print(str(e))
+            print("Restarting.")
             continue
 
 
 depthImg = Pipeline()
 def main():
     try:
-        server = ThreadedHTTPServer(('0.0.0.0', 8080), RequestHandler)
+        server = ThreadedHTTPServer(('0.0.0.0', 5809), RequestHandler)
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             executor.submit(camera_handler, depthImg)
             executor.submit(server.serve_forever)
