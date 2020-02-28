@@ -6,47 +6,97 @@ from socketserver import ThreadingMixIn
 from io import BytesIO
 import numpy as np
 from PIL import Image
+import concurrent.futures
+import time 
 
-pipeline = None
-depth_scale = None
+TARGET_DISTANCE = 50
+RANGE = 12
 
-MIN_DISTANCE = 24
-MAX_DISTANCE = 36
+MIN_DISTANCE = TARGET_DISTANCE - (RANGE/2)
+MAX_DISTANCE = MIN_DISTANCE + RANGE
 
+def linear_map(x, inMin, inMax, outMin, outMax):
+    # Figure out how 'wide' each range is
+    inSpan = inMax - inMin
+    outSpan = outMax - outMin
 
-class CamHandler(BaseHTTPRequestHandler):
+    # Convert the left range into a 0-1 range (float)
+    valueScaled = float(x - inMin) / float(inSpan)
+
+    # Convert the 0-1 range into a value in the right range.
+    return outMin + (valueScaled * outSpan)
+
+def generate_colormap(greenRange):
+    greenStart = round(128-(greenRange/2))
+    greenStop = round(128+(greenRange/2))
+    lut = np.zeros((256, 1, 3), dtype=np.uint8)
+    #red -> green
+    for i in range(0, greenStart):
+        lut[i, 0, 0] = linear_map(i, 0, greenStart, 128, 0)
+        lut[i, 0, 1] = linear_map(i, 0, greenStart, 0, 255)
+    for i in range(greenStart, greenStop):
+        lut[i, 0, :] = [0, 255, 0]
+    for i in range(greenStop, 256):
+        lut[i, 0, 1] = linear_map(i, greenStop, 255, 255, 0)
+        lut[i, 0, 2] = linear_map(i, greenStop, 255, 0, 128)
+    return lut
+
+def processDepthImage(np_image, depth_scale, lut):
+    np_image = np_image.astype(np.float)
+    np_image *= depth_scale
+    #np_image = cv2.subtract(np_image, MIN_DISTANCE)
+    #np_image *= 255/(MAX_DISTANCE-MIN_DISTANCE)
+    #np_image = cv2.convertScaleAbs(np_image)
+    np_image = np.clip(np_image, 0, 255)
+    np_image = np_image.astype(np.uint8)
+    #print(np.amin(np_image), np.amax(np_image))
+    #np_image *= depth_scale
+    #imgRGB=cv2.cvtColor(np_image,cv2.COLOR_GRAY2RGB)
+    #imgRGB = cv2.applyColorMap(np_image, lut)
+    return np_image
+
+class Pipeline:
+    def __init__(self):
+        self.img = None
+        self.producer_lock = threading.Lock()
+        self.consumer_lock = threading.Lock()
+        self.consumer_lock.acquire()
+
+    def get_img(self, name):
+        self.consumer_lock.acquire()
+        img = self.img
+        self.producer_lock.release()
+        return img
+
+    def set_img(self, img, name):
+        self.producer_lock.acquire()
+        self.img = img
+        self.consumer_lock.release()
+
+class Semaphore():
+    def __init__(self):
+        self.state = False
+
+    def get(self):
+        return self.state
+
+    def set(self, state):
+        self.state = state
+
+class RequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path.endswith('.mjpg'):
-            print("Got mjpeg request")
+        if self.path.endswith('depth.mjpg'):
             self.send_response(200)
             self.send_header('Content-type','multipart/x-mixed-replace; boundary=--jpgboundary')
             self.end_headers()
             while True:
                 try:
-                    #rc,img = capture.read()
-                    #if not rc:
-                    #    continue
-                    frames = pipeline.wait_for_frames()
-                    depth = frames.get_depth_frame().as_frame().get_data()
-                    np_image = np.asanyarray(depth)
+                    #frames = pipeline.wait_for_frames()
+                    #depth = frames.get_depth_frame().as_frame().get_data()
+                    #np_image = np.asanyarray(depth)
                     #print(np_image.shape, np_image.dtype)
-                    np_image = np_image.astype(np.float)
-                    np_image *= depth_scale
-                    np_image = cv2.subtract(np_image, MIN_DISTANCE)
-                    np_image *= 255/(MAX_DISTANCE-MIN_DISTANCE)
-                    #np_image = cv2.convertScaleAbs(np_image)
-                    np_image = np.clip(np_image, 0, 255)
-                    np_image = np_image.astype(np.uint8)
-                    print(np.amin(np_image), np.amax(np_image))
-                    #np_image *= depth_scale
-                    #imgRGB=cv2.cvtColor(np_image,cv2.COLOR_GRAY2RGB)
-                    imgRGB = cv2.applyColorMap(np_image, cv2.COLORMAP_JET)
-                    #print(imgRGB.shape, imgRGB.dtype)
-                    #imgRGB = (imgRGB / 257).astype(np.uint8)
-                    #print(imgRGB.shape, imgRGB.dtype)
-                    #print(np.amin(imgRGB), np.amax(imgRGB))
-                    #jpg = Image.fromarray(imgRGB, 'RGB')
-                    jpg = Image.fromarray(np_image)
+                    #imgRGB = processDepthImage(np_image)
+                    jpg = Image.fromarray(depthImg.get_img("Consumer"))
                     tmpFile = BytesIO()
                     #jpg = jpg.point(lambda i:i*(1./256)).convert('L')
                     jpg.save(tmpFile,'JPEG')
@@ -55,16 +105,43 @@ class CamHandler(BaseHTTPRequestHandler):
                     self.send_header('Content-length',str(len(tmpFile.getvalue())))
                     self.end_headers()
                     jpg.save(self.wfile,'JPEG')
-                    #time.sleep(0.05)
+                    time.sleep(0.02)
                 except KeyboardInterrupt:
                     break
             return
+
+        if self.path.endswith('color.mjpg'):
+            self.send_response(200)
+            self.send_header('Content-type','multipart/x-mixed-replace; boundary=--jpgboundary')
+            self.end_headers()
+            while True:
+                try:
+                    #frames = pipeline.wait_for_frames()
+                    #depth = frames.get_depth_frame().as_frame().get_data()
+                    #np_image = np.asanyarray(depth)
+                    #print(np_image.shape, np_image.dtype)
+                    #imgRGB = processDepthImage(np_image)
+                    jpg = Image.fromarray(colorImg.get_img("Consumer"))
+                    tmpFile = BytesIO()
+                    #jpg = jpg.point(lambda i:i*(1./256)).convert('L')
+                    jpg.save(tmpFile,'JPEG')
+                    self.wfile.write("--jpgboundary".encode('utf-8'))
+                    self.send_header('Content-type','image/jpeg')
+                    self.send_header('Content-length',str(len(tmpFile.getvalue())))
+                    self.end_headers()
+                    jpg.save(self.wfile,'JPEG')
+                    time.sleep(0.02)
+                except KeyboardInterrupt:
+                    break
+            return
+
         if self.path.endswith('.html'):
             self.send_response(200)
             self.send_header('Content-type','text/html')
             self.end_headers()
             self.wfile.write('<html><head></head><body>'.encode('utf-8'))
-            self.wfile.write('<img src="cam.mjpg"/>'.encode('utf-8'))
+            self.wfile.write('<img src="depth.mjpg"/>'.encode('utf-8'))
+            #self.wfile.write('<img src="color.mjpg"/>'.encode('utf-8'))
             self.wfile.write('</body></html>'.encode('utf-8'))
             return
 
@@ -72,9 +149,10 @@ class CamHandler(BaseHTTPRequestHandler):
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """Handle requests in a separate thread."""
 
-def main():
-    global pipeline
-    global depth_scale
+def camera_handler(depth_pipe, color_pipe):
+    print("Starting camera handler")
+
+    lut = generate_colormap(50)
     pipeline = rs.pipeline()
     prof = pipeline.start()
     dev = prof.get_device()
@@ -83,15 +161,39 @@ def main():
 
     ds = rs.depth_sensor(dev.query_sensors()[0])
     depth_scale = ds.get_depth_scale() #metrics per 1 LSB
-    depth_scale *= 39.3701 #Convert to inches 
+    depth_scale *= 39.3701 #Convert to inches
     print("%f inches per LSB"%depth_scale)
-
     try:
-        server = ThreadedHTTPServer(('0.0.0.0', 8080), CamHandler)
-        print("server started")
-        server.serve_forever()
-    except KeyboardInterrupt:
+        while True:
+            starttime = time.time()
+            frames = pipeline.wait_for_frames()
+            depth = frames.get_depth_frame().as_frame().get_data()
+            color = frames.get_color_frame().as_frame().get_data()
+            np_image = np.asanyarray(depth)
+            color_np = np.asanyarray(color)
+            #print(np_image.shape, np_image.dtype)
+            imgRGB = processDepthImage(np_image, depth_scale, lut)
+            depth_pipe.set_img(imgRGB, "Producer")
+            color_pipe.set_img(color_np, "Producer")
+            print("%f FPS"%(1./(time.time()-starttime)))
+    except:
+        print("Exception in camera handler.")
         pipeline.stop()
+        raise
+
+
+depthImg = Pipeline()
+colorImg = Pipeline()
+def main():
+    try:
+        server = ThreadedHTTPServer(('0.0.0.0', 8080), RequestHandler)
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        executor.submit(camera_handler, depthImg, colorImg)
+        executor.submit(server.serve_forever)
+        print("All threads started.")
+        while True:
+            time.sleep(0.05)
+    except KeyboardInterrupt:
         server.socket.close()
 
 if __name__ == '__main__':
