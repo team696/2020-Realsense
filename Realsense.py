@@ -32,7 +32,11 @@ class CamHandler(BaseHTTPRequestHandler):
                     #print(np_image.shape, np_image.dtype)
                     np_image = np_image.astype(np.float)
                     np_image *= depth_scale
-                    np_image = cv2.convertScaleAbs(np_image)
+                    np_image = cv2.subtract(np_image, MIN_DISTANCE)
+                    np_image *= 255/(MAX_DISTANCE-MIN_DISTANCE)
+                    #np_image = cv2.convertScaleAbs(np_image)
+                    np_image = np.clip(np_image, 0, 255)
+                    np_image = np_image.astype(np.uint8)
                     print(np.amin(np_image), np.amax(np_image))
                     #np_image *= depth_scale
                     #imgRGB=cv2.cvtColor(np_image,cv2.COLOR_GRAY2RGB)
@@ -80,6 +84,7 @@ def main():
     ds = rs.depth_sensor(dev.query_sensors()[0])
     depth_scale = ds.get_depth_scale() #metrics per 1 LSB
     depth_scale *= 39.3701 #Convert to inches 
+    print("%f inches per LSB"%depth_scale)
 
     try:
         server = ThreadedHTTPServer(('0.0.0.0', 8080), CamHandler)
