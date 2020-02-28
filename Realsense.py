@@ -7,9 +7,9 @@ from io import BytesIO
 import numpy as np
 from PIL import Image
 import concurrent.futures
-import time 
+import time
 
-TARGET_DISTANCE = 50
+TARGET_DISTANCE = 48
 RANGE = 12
 
 MIN_DISTANCE = TARGET_DISTANCE - (RANGE/2)
@@ -44,16 +44,14 @@ def generate_colormap(greenRange):
 def processDepthImage(np_image, depth_scale, lut):
     np_image = np_image.astype(np.float)
     np_image *= depth_scale
-    #np_image = cv2.subtract(np_image, MIN_DISTANCE)
-    #np_image *= 255/(MAX_DISTANCE-MIN_DISTANCE)
+    np_image = cv2.subtract(np_image, MIN_DISTANCE)
+    np_image *= 255/(MAX_DISTANCE-MIN_DISTANCE)
     #np_image = cv2.convertScaleAbs(np_image)
     np_image = np.clip(np_image, 0, 255)
     np_image = np_image.astype(np.uint8)
     #print(np.amin(np_image), np.amax(np_image))
-    #np_image *= depth_scale
-    #imgRGB=cv2.cvtColor(np_image,cv2.COLOR_GRAY2RGB)
-    #imgRGB = cv2.applyColorMap(np_image, lut)
-    return np_image
+    imgRGB = cv2.applyColorMap(np_image, lut)
+    return imgRGB
 
 class Pipeline:
     def __init__(self):
@@ -72,16 +70,6 @@ class Pipeline:
         self.producer_lock.acquire()
         self.img = img
         self.consumer_lock.release()
-
-class Semaphore():
-    def __init__(self):
-        self.state = False
-
-    def get(self):
-        return self.state
-
-    def set(self, state):
-        self.state = state
 
 class RequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -110,31 +98,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                     break
             return
 
-        if self.path.endswith('color.mjpg'):
-            self.send_response(200)
-            self.send_header('Content-type','multipart/x-mixed-replace; boundary=--jpgboundary')
-            self.end_headers()
-            while True:
-                try:
-                    #frames = pipeline.wait_for_frames()
-                    #depth = frames.get_depth_frame().as_frame().get_data()
-                    #np_image = np.asanyarray(depth)
-                    #print(np_image.shape, np_image.dtype)
-                    #imgRGB = processDepthImage(np_image)
-                    jpg = Image.fromarray(colorImg.get_img("Consumer"))
-                    tmpFile = BytesIO()
-                    #jpg = jpg.point(lambda i:i*(1./256)).convert('L')
-                    jpg.save(tmpFile,'JPEG')
-                    self.wfile.write("--jpgboundary".encode('utf-8'))
-                    self.send_header('Content-type','image/jpeg')
-                    self.send_header('Content-length',str(len(tmpFile.getvalue())))
-                    self.end_headers()
-                    jpg.save(self.wfile,'JPEG')
-                    time.sleep(0.02)
-                except KeyboardInterrupt:
-                    break
-            return
-
         if self.path.endswith('.html'):
             self.send_response(200)
             self.send_header('Content-type','text/html')
@@ -149,50 +112,54 @@ class RequestHandler(BaseHTTPRequestHandler):
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """Handle requests in a separate thread."""
 
-def camera_handler(depth_pipe, color_pipe):
-    print("Starting camera handler")
-
+def camera_handler(depth_pipe):
     lut = generate_colormap(50)
-    pipeline = rs.pipeline()
-    prof = pipeline.start()
-    dev = prof.get_device()
-    print(dev)
-    print([str(x) for x in dev.query_sensors()])
-
-    ds = rs.depth_sensor(dev.query_sensors()[0])
-    depth_scale = ds.get_depth_scale() #metrics per 1 LSB
-    depth_scale *= 39.3701 #Convert to inches
-    print("%f inches per LSB"%depth_scale)
-    try:
-        while True:
-            starttime = time.time()
-            frames = pipeline.wait_for_frames()
-            depth = frames.get_depth_frame().as_frame().get_data()
-            color = frames.get_color_frame().as_frame().get_data()
-            np_image = np.asanyarray(depth)
-            color_np = np.asanyarray(color)
-            #print(np_image.shape, np_image.dtype)
-            imgRGB = processDepthImage(np_image, depth_scale, lut)
-            depth_pipe.set_img(imgRGB, "Producer")
-            color_pipe.set_img(color_np, "Producer")
-            print("%f FPS"%(1./(time.time()-starttime)))
-    except:
-        print("Exception in camera handler.")
-        pipeline.stop()
-        raise
+    while True:
+        try:
+            print("Starting camera handler")
+            pipeline = rs.pipeline()
+            prof = pipeline.start()
+            dev = prof.get_device()
+            dev.hardware_reset()
+            time.sleep(2.)
+            pipeline = rs.pipeline()
+            prof = pipeline.start()
+            dev = prof.get_device()
+            print(dev)
+            print([str(x) for x in dev.query_sensors()])
+    
+            ds = rs.depth_sensor(dev.query_sensors()[0])
+            depth_scale = ds.get_depth_scale() #metrics per 1 LSB
+            depth_scale *= 39.3701 #Convert to inches
+            print("%f inches per LSB"%depth_scale)
+    
+            try:
+                while True:
+                    starttime = time.time()
+                    frames = pipeline.wait_for_frames()
+                    depth = frames.get_depth_frame().as_frame().get_data()
+                    np_image = np.asanyarray(depth)
+                    #print(np_image.shape, np_image.dtype)
+                    imgRGB = processDepthImage(np_image, depth_scale, lut)
+                    depth_pipe.set_img(imgRGB, "Producer")
+                    print("%f FPS"%(1./(time.time()-starttime)))
+            except:
+                print("Exception in camera handler.")
+                pipeline.stop()
+                raise
+        except KeyboardInterrupt:
+            break
+        except:
+            continue
 
 
 depthImg = Pipeline()
-colorImg = Pipeline()
 def main():
     try:
         server = ThreadedHTTPServer(('0.0.0.0', 8080), RequestHandler)
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
-        executor.submit(camera_handler, depthImg, colorImg)
-        executor.submit(server.serve_forever)
-        print("All threads started.")
-        while True:
-            time.sleep(0.05)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            executor.submit(camera_handler, depthImg)
+            executor.submit(server.serve_forever)
     except KeyboardInterrupt:
         server.socket.close()
 
